@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Tray icon for lid-awake (StatusNotifierItem + dbusmenu, for COSMIC's status area)."""
+import os
+import subprocess
+
+import dbus
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+
+LID_AWAKE = os.path.expanduser("~/.local/bin/lid-awake")
+ICONS = os.path.expanduser("~/.local/share/lid-awake")
+ICON_ON = f"{ICONS}/cup-full-symbolic.svg"     # full cup: stays awake with lid closed
+ICON_OFF = f"{ICONS}/cup-empty-symbolic.svg"   # hollow cup: lid closes -> suspend
+SNI = "org.kde.StatusNotifierItem"
+MENU = "com.canonical.dbusmenu"
+PROPS = "org.freedesktop.DBus.Properties"
+
+
+def is_on():
+    r = subprocess.run([LID_AWAKE, "status"], capture_output=True, text=True)
+    return r.stdout.strip() == "on"
+
+
+class Menu(dbus.service.Object):
+    def __init__(self, bus, tray):
+        super().__init__(bus, "/MenuBar")
+        self.tray = tray
+        self.revision = 1
+
+    def items(self):
+        on = self.tray.on
+        return {
+            1: {"label": "Lid awake: ON (lid closed = screen off)" if on
+                else "Lid awake: OFF (lid closed = suspend)", "enabled": False},
+            2: {"type": "separator"},
+            3: {"label": "Quit tray icon"},
+        }
+
+    def node(self, i, props):
+        return dbus.Struct((dbus.Int32(i), dbus.Dictionary(props, signature="sv"),
+                            dbus.Array([], signature="v")), signature="ia{sv}av")
+
+    @dbus.service.method(MENU, in_signature="iias", out_signature="u(ia{sv}av)")
+    def GetLayout(self, parent, depth, names):
+        children = dbus.Array([self.node(i, p) for i, p in self.items().items()], signature="v")
+        root = dbus.Struct((dbus.Int32(0),
+                            dbus.Dictionary({"children-display": "submenu"}, signature="sv"),
+                            children), signature="ia{sv}av")
+        return dbus.UInt32(self.revision), root
+
+    @dbus.service.method(MENU, in_signature="aias", out_signature="a(ia{sv})")
+    def GetGroupProperties(self, ids, names):
+        items = self.items()
+        return dbus.Array([dbus.Struct((dbus.Int32(i), dbus.Dictionary(items[i], signature="sv")))
+                           for i in ids if i in items], signature="(ia{sv})")
+
+    @dbus.service.method(MENU, in_signature="is", out_signature="v")
+    def GetProperty(self, i, name):
+        return self.items().get(i, {}).get(name, "")
+
+    @dbus.service.method(MENU, in_signature="isvu", out_signature="")
+    def Event(self, i, event, data, ts):
+        # COSMIC opens this menu on right-click; use that as the toggle.
+        if i == 0 and event == "opened":
+            self.tray.toggle()
+        elif i == 3 and event == "clicked":
+            loop.quit()
+
+    @dbus.service.method(MENU, in_signature="a(isvu)", out_signature="ai")
+    def EventGroup(self, events):
+        for i, e, d, t in events:
+            self.Event(i, e, d, t)
+        return dbus.Array([], signature="i")
+
+    @dbus.service.method(MENU, in_signature="i", out_signature="b")
+    def AboutToShow(self, i):
+        return False
+
+    @dbus.service.method(MENU, in_signature="ai", out_signature="aiai")
+    def AboutToShowGroup(self, ids):
+        return dbus.Array([], signature="i"), dbus.Array([], signature="i")
+
+    @dbus.service.signal(MENU, signature="ui")
+    def LayoutUpdated(self, revision, parent):
+        pass
+
+    @dbus.service.signal(MENU, signature="a(ia{sv})a(ias)")
+    def ItemsPropertiesUpdated(self, updated, removed):
+        pass
+
+    def changed(self):
+        self.revision += 1
+        self.LayoutUpdated(dbus.UInt32(self.revision), dbus.Int32(0))
+
+    @dbus.service.method(PROPS, in_signature="ss", out_signature="v")
+    def Get(self, iface, prop):
+        return self.GetAll(iface)[prop]
+
+    @dbus.service.method(PROPS, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        return {"Version": dbus.UInt32(3), "TextDirection": "ltr", "Status": "normal",
+                "IconThemePath": dbus.Array([], signature="s")}
+
+
+class Tray(dbus.service.Object):
+    def __init__(self, bus):
+        super().__init__(bus, "/StatusNotifierItem")
+        self.on = is_on()
+        self.menu = Menu(bus, self)
+
+    def props(self):
+        state = "ON: closing the lid only turns off the screen" if self.on \
+            else "OFF: closing the lid suspends"
+        return {
+            "Category": "Hardware", "Id": "lid-awake", "Title": "Lid Awake",
+            "Status": "Active", "IconName": ICON_ON if self.on else ICON_OFF,
+            "IconThemePath": "", "ItemIsMenu": False,
+            "Menu": dbus.ObjectPath("/MenuBar"),
+            "ToolTip": dbus.Struct(("", dbus.Array([], signature="(iiay)"),
+                                    "Lid Awake", state), signature="sa(iiay)ss"),
+        }
+
+    @dbus.service.method(PROPS, in_signature="ss", out_signature="v")
+    def Get(self, iface, prop):
+        return self.props()[prop]
+
+    @dbus.service.method(PROPS, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        return self.props()
+
+    @dbus.service.method(SNI, in_signature="ii")
+    def Activate(self, x, y):
+        self.toggle()  # left-click
+
+    @dbus.service.method(SNI, in_signature="ii")
+    def SecondaryActivate(self, x, y):
+        self.toggle()
+
+    @dbus.service.method(SNI, in_signature="ii")
+    def ContextMenu(self, x, y):
+        pass
+
+    @dbus.service.method(SNI, in_signature="is")
+    def Scroll(self, delta, orientation):
+        pass
+
+    @dbus.service.signal(SNI)
+    def NewIcon(self):
+        pass
+
+    @dbus.service.signal(SNI)
+    def NewToolTip(self):
+        pass
+
+    @dbus.service.signal(SNI, signature="s")
+    def NewStatus(self, status):
+        pass
+
+    def toggle(self):
+        subprocess.run([LID_AWAKE, "off" if self.on else "on"], capture_output=True)
+        self.refresh()
+
+    def refresh(self):
+        now = is_on()
+        if now != self.on:
+            self.on = now
+            self.NewIcon()
+            self.NewToolTip()
+            self.menu.changed()
+        return True  # keep the GLib timer going
+
+
+DBusGMainLoop(set_as_default=True)
+bus = dbus.SessionBus()
+name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+bus_name = dbus.service.BusName(name, bus)
+tray = Tray(bus)
+
+
+def register(*_):
+    try:
+        watcher = bus.get_object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
+        watcher.RegisterStatusNotifierItem(name, dbus_interface="org.kde.StatusNotifierWatcher")
+    except dbus.DBusException as e:
+        print("waiting for tray:", e)
+
+
+register()
+# re-register if the panel restarts
+bus.watch_name_owner("org.kde.StatusNotifierWatcher", lambda owner: owner and register())
+GLib.timeout_add_seconds(2, tray.refresh)  # pick up changes made from the terminal
+loop = GLib.MainLoop()
+loop.run()
