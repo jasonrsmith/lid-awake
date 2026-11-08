@@ -3,7 +3,7 @@
 # but does NOT suspend, so agents/builds keep running.
 #   lid-awake on | off | status | toggle
 set -u
-PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/lid-awake.pid"
+UNIT=lid-awake  # transient systemd --user unit holding the inhibitor
 LID=$(ls -d /proc/acpi/button/lid/*/ | head -1)state
 BL=$(ls /sys/class/backlight | head -1)
 
@@ -27,7 +27,7 @@ watch_lid() {
   done
 }
 
-running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+running() { systemctl --user is-active --quiet "$UNIT"; }
 
 notify() { command -v notify-send >/dev/null && notify-send -a "Lid Awake" "$1"; echo "$1"; }
 
@@ -35,14 +35,14 @@ case "${1:-toggle}" in
   _watch) watch_lid ;;
   on)
     running && { echo "already on"; exit 0; }
-    setsid systemd-inhibit --what=handle-lid-switch:sleep --who="lid-awake" \
+    # Own unit, so it survives the terminal/tray that started it.
+    systemd-run --user --quiet --collect --unit="$UNIT" \
+      systemd-inhibit --what=handle-lid-switch:sleep --who="lid-awake" \
       --why="Keep running with lid closed" --mode=block \
-      "$0" _watch >/dev/null 2>&1 < /dev/null &
-    echo $! > "$PIDFILE"
+      "$(readlink -f "$0")" _watch
     notify "Lid-awake ON: closing the lid will only turn off the screen" ;;
   off)
-    if running; then pkill -TERM -P "$(cat "$PIDFILE")"; kill "$(cat "$PIDFILE")" 2>/dev/null; fi
-    rm -f "$PIDFILE"
+    systemctl --user stop "$UNIT" 2>/dev/null
     notify "Lid-awake OFF: closing the lid suspends normally" ;;
   status) running && echo on || echo off ;;
   toggle) running && "$0" off || "$0" on ;;

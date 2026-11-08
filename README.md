@@ -28,9 +28,9 @@ Tray icon (COSMIC):
 
 ## How it works
 
-- `lid-awake on` runs `systemd-inhibit --what=handle-lid-switch:sleep` so logind ignores the lid and won't sleep.
+- `lid-awake on` starts a transient systemd user unit (`lid-awake.service`) that runs `systemd-inhibit --what=handle-lid-switch:sleep`, so logind ignores the lid and won't sleep. Because it's its own unit, closing the terminal or app that turned it on doesn't end the mode. `lid-awake off` stops the unit.
 - While the mode is on, a watcher checks the lid state every second. When the lid closes it sets the backlight to 0 through logind's `SetBrightness` (no root needed), and puts the brightness back when the lid opens.
-- `lid-awake-tray` is a small StatusNotifierItem + dbusmenu service in Python. It checks the mode every 2 seconds, so changes made from the terminal show up in the tray.
+- `lid-awake-tray` is a small StatusNotifierItem + dbusmenu service in Python. It runs as the `lid-awake-tray.service` systemd user service, starts with your graphical session, and restarts if it crashes. It checks the mode every 2 seconds, so changes made from the terminal show up in the tray.
 
 ⚠️ With the lid closed the laptop is fully awake and still makes heat. Don't put it in a bag while the mode is on.
 
